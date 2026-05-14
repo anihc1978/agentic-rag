@@ -1,22 +1,19 @@
 import { NextRequest } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
-import { docStore } from '@/lib/doc-store'
 
 const MAX_TOOL_CALLS = 20
 const MAX_READ_CHARS = 12000
 const MAX_GREP_RESULTS = 30
 
-// Tool implementations
-function toolListFiles(): string {
-  const names = docStore.names()
-  if (!names.length) return 'No documents uploaded yet.'
-  return names.join('\n')
+interface Doc { name: string; content: string }
+
+function toolListFiles(docs: Doc[]): string {
+  if (!docs.length) return 'No documents uploaded yet.'
+  return docs.map(d => d.name).join('\n')
 }
 
-function toolGrep(pattern: string): string {
-  const docs = docStore.list()
+function toolGrep(docs: Doc[], pattern: string): string {
   if (!docs.length) return 'No documents to search.'
-
   const results: string[] = []
   const re = new RegExp(pattern, 'gi')
 
@@ -34,8 +31,8 @@ function toolGrep(pattern: string): string {
   return results.length ? results.join('\n') : `No matches found for pattern: ${pattern}`
 }
 
-function toolReadFile(name: string, startLine?: number, endLine?: number): string {
-  const doc = docStore.get(name)
+function toolReadFile(docs: Doc[], name: string, startLine?: number, endLine?: number): string {
+  const doc = docs.find(d => d.name === name)
   if (!doc) return `File not found: ${name}`
 
   const lines = doc.content.split('\n')
@@ -48,11 +45,12 @@ function toolReadFile(name: string, startLine?: number, endLine?: number): strin
     : slice
 }
 
-function dispatchTool(name: string, input: Record<string, unknown>): string {
+function dispatchTool(docs: Doc[], name: string, input: Record<string, unknown>): string {
   switch (name) {
-    case 'list_files': return toolListFiles()
-    case 'grep': return toolGrep(String(input.pattern ?? ''))
+    case 'list_files': return toolListFiles(docs)
+    case 'grep': return toolGrep(docs, String(input.pattern ?? ''))
     case 'read_file': return toolReadFile(
+      docs,
       String(input.filename ?? ''),
       input.start_line ? Number(input.start_line) : undefined,
       input.end_line ? Number(input.end_line) : undefined
@@ -102,9 +100,13 @@ Always cite your sources: include the filename and a brief quote from where you 
 Be concise but thorough. If information is not in the documents, say so clearly.`
 
 export async function POST(req: NextRequest) {
-  const { question } = await req.json()
+  const { question, docs } = await req.json() as { question: string; docs: Doc[] }
+
   if (!question?.trim()) {
     return new Response(JSON.stringify({ error: 'No question provided' }), { status: 400 })
+  }
+  if (!docs?.length) {
+    return new Response(JSON.stringify({ error: 'No documents provided' }), { status: 400 })
   }
 
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! })
@@ -131,7 +133,6 @@ export async function POST(req: NextRequest) {
             messages,
           })
 
-          // Emit assistant content — both text and tool calls
           for (const block of response.content) {
             if (block.type === 'text') {
               send({ type: 'text', text: block.text })
@@ -149,14 +150,12 @@ export async function POST(req: NextRequest) {
 
             for (const block of response.content) {
               if (block.type !== 'tool_use') continue
-
               toolCallCount++
               if (toolCallCount > MAX_TOOL_CALLS) {
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Tool call limit reached.' })
                 continue
               }
-
-              const result = dispatchTool(block.name, block.input as Record<string, unknown>)
+              const result = dispatchTool(docs, block.name, block.input as Record<string, unknown>)
               send({ type: 'tool_result', tool: block.name, result: result.slice(0, 500) })
               toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: result })
             }

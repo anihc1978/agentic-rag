@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { docStore } from '@/lib/doc-store'
 
 async function extractText(file: File): Promise<string> {
   const buffer = Buffer.from(await file.arrayBuffer())
@@ -32,12 +31,11 @@ export async function POST(req: NextRequest) {
   for (const file of files) {
     try {
       const content = await extractText(file)
-      docStore.add({ name: file.name, content, size: file.size, uploadedAt: Date.now() })
-      results.push({ name: file.name, ok: true })
+      results.push({ name: file.name, content, size: file.size, ok: true })
     } catch (e) {
-      results.push({ name: file.name, ok: false, error: String(e) })
+      results.push({ name: file.name, content: '', size: file.size, ok: false, error: String(e) })
     }
   }
 
-  return NextResponse.json({ results, total: docStore.list().length })
+  return NextResponse.json({ results })
 }
