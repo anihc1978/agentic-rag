@@ -4,6 +4,8 @@ import Anthropic from '@anthropic-ai/sdk'
 const MAX_TOOL_CALLS = 20
 const MAX_READ_CHARS = 12000
 const MAX_GREP_RESULTS = 30
+const MAX_PATTERN_LENGTH = 200
+const MAX_GREP_BYTES = 2_000_000
 
 interface Doc { name: string; content: string }
 
@@ -14,12 +16,25 @@ function toolListFiles(docs: Doc[]): string {
 
 function toolGrep(docs: Doc[], pattern: string): string {
   if (!docs.length) return 'No documents to search.'
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    return `Invalid pattern: too long (max ${MAX_PATTERN_LENGTH} characters).`
+  }
+
+  let re: RegExp
+  try {
+    re = new RegExp(pattern, 'gi')
+  } catch {
+    return `Invalid pattern: ${pattern}`
+  }
+
   const results: string[] = []
-  const re = new RegExp(pattern, 'gi')
+  let bytesSearched = 0
 
   for (const doc of docs) {
     const lines = doc.content.split('\n')
     for (let i = 0; i < lines.length; i++) {
+      bytesSearched += lines[i].length
+      if (bytesSearched > MAX_GREP_BYTES) return results.join('\n')
       if (re.test(lines[i])) {
         results.push(`${doc.name}:${i + 1}: ${lines[i].trim()}`)
         if (results.length >= MAX_GREP_RESULTS) return results.join('\n')
@@ -89,6 +104,18 @@ const TOOLS: Anthropic.Tool[] = [
   },
 ]
 
+const ALLOWED_ORIGINS = [
+  'https://agentic-rag-roan.vercel.app',
+  'http://localhost:3000',
+  'http://localhost:3001',
+]
+
+// This project's deployment / preview aliases all share the agentic-rag-*.vercel.app prefix.
+function isAllowedOrigin(origin: string): boolean {
+  if (ALLOWED_ORIGINS.includes(origin)) return true
+  return /^https:\/\/agentic-rag-[a-z0-9-]+\.vercel\.app$/.test(origin)
+}
+
 const SYSTEM = `You are an expert research assistant with access to a knowledge base of documents.
 Use your tools strategically to find the best answer:
 1. Start by listing files to understand what's available
@@ -100,6 +127,11 @@ Always cite your sources: include the filename and a brief quote from where you 
 Be concise but thorough. If information is not in the documents, say so clearly.`
 
 export async function POST(req: NextRequest) {
+  const origin = req.headers.get('origin')
+  if (origin && !isAllowedOrigin(origin)) {
+    return new Response(JSON.stringify({ error: 'Origin not allowed' }), { status: 403 })
+  }
+
   const { question, docs } = await req.json() as { question: string; docs: Doc[] }
 
   if (!question?.trim()) {
